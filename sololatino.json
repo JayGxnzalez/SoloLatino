@@ -8,7 +8,7 @@
   },
   "version": "1.0.0 debug 4",
   "language": "Spanish (Latino)",
-  "streamType": "MP4",
+  "streamType": "HLS",
   "quality": "1080p",
   "baseUrl": "https://sololatino.net/",
   "searchBaseUrl": "https://sololatino.net/",
