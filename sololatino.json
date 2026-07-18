@@ -1,0 +1,20 @@
+{
+  "sourceName": "SoloLatino",
+  "iconUrl": "https://www.google.com/s2/favicons?domain=sololatino.net&sz=128",
+  "author": {
+    "name": "Jay",
+    "icon": "https://avatars.githubusercontent.com/JayGxnzalez?s=400",
+    "url": "https://github.com/JayGxnzalez"
+  },
+  "version": "1.0.0",
+  "language": "Spanish (Latino)",
+  "streamType": "HLS",
+  "quality": "1080p",
+  "baseUrl": "https://sololatino.net/",
+  "searchBaseUrl": "https://sololatino.net/",
+  "scriptUrl": "https://raw.githubusercontent.com/JayGxnzalez/SoloLatino/refs/heads/main/sololatino.js",
+  "type": "Movie/TV",
+  "downloadSupport": true,
+  "asyncJS": true,
+  "softsub": false
+}
