@@ -191,33 +191,43 @@ async function extractStreamUrl(url) {
       return JSON.stringify({ streams: [], subtitles: '', subtitlesHeaders: {}, allSubtitles: [] });
     }
 
-    // 3) Scan for servers.
+    // 3) Scan (optional): gives the server list + meta. Non-fatal — the download path
+    //    below only needs the token, so we don't bail if the scan is empty.
     var scan = await sphp(embedUrl, { a: '1', tok: tok });
-    if (!scan || !scan.s || !scan.s.length) {
-      console.log('[sololatino] scan returned no servers: ' + JSON.stringify(scan && scan.error));
-      return JSON.stringify({ streams: [], subtitles: '', subtitlesHeaders: {}, allSubtitles: [] });
-    }
-
-    // Build language-ordered server groups: LAT first, then ESP, then whatever else, then flat.
     console.log('[sololatino] scan raw=' + JSON.stringify(scan).slice(0, 400));
-    var groups = [];
-    if (scan.langs_s) {
-      if (scan.langs_s.LAT) groups.push({ lang: 'LAT', list: scan.langs_s.LAT });
-      if (scan.langs_s.ESP) groups.push({ lang: 'ESP', list: scan.langs_s.ESP });
-      for (var k in scan.langs_s) {
-        if (k !== 'LAT' && k !== 'ESP') groups.push({ lang: k, list: scan.langs_s[k] });
-      }
-    }
-    if (!groups.length) groups.push({ lang: '', list: scan.s });
 
     var streams = [];
-    // Resolve each group in parallel; keep every working stream so the user has options.
-    for (var g = 0; g < groups.length; g++) {
-      var grp = groups[g];
-      var resolved = await Promise.all(grp.list.map(function (srv) {
-        return resolveServer(embedUrl, tok, srv[1], srv[0], grp.lang);
-      }));
-      for (var i = 0; i < resolved.length; i++) if (resolved[i]) streams.push(resolved[i]);
+
+    // PRIMARY (ungated): the "Directo" download button. a=dlshort_mf + tok only — no
+    //   no_click gate — returns a short link that redirects through /p.php -> MediaFire.
+    var dm = await sphp(embedUrl, { a: 'dlshort_mf', tok: tok });
+    console.log('[sololatino] dlshort_mf -> ' + JSON.stringify(dm).slice(0, 300));
+    var shortUrl = dm && (dm.short || dm.u || dm.url || dm.mf_short);
+    if (shortUrl) {
+      streams.push({ title: 'Directo', streamUrl: absUrl(shortUrl),
+        headers: { 'Referer': embedUrl, 'User-Agent': UA, 'Origin': EMBED }, subtitles: [], _mp4: true });
+    }
+
+    // SECONDARY (best-effort): per-server player resolve for extra language/quality options.
+    //   These go through the a=2 no_click gate and may fail; that's fine, PRIMARY covers us.
+    if (scan && scan.s && scan.s.length) {
+      var groups = [];
+      if (scan.langs_s) {
+        if (scan.langs_s.LAT) groups.push({ lang: 'LAT', list: scan.langs_s.LAT });
+        if (scan.langs_s.ESP) groups.push({ lang: 'ESP', list: scan.langs_s.ESP });
+        for (var k in scan.langs_s) {
+          if (k !== 'LAT' && k !== 'ESP') groups.push({ lang: k, list: scan.langs_s[k] });
+        }
+      }
+      if (!groups.length) groups.push({ lang: '', list: scan.s });
+
+      for (var g = 0; g < groups.length; g++) {
+        var grp = groups[g];
+        var resolved = await Promise.all(grp.list.map(function (srv) {
+          return resolveServer(embedUrl, tok, srv[1], srv[0], grp.lang);
+        }));
+        for (var i = 0; i < resolved.length; i++) if (resolved[i]) streams.push(resolved[i]);
+      }
     }
 
     // Sort: direct mp4 first (AVPlayer-friendly), HLS after.
@@ -248,24 +258,33 @@ async function resolveServer(embedUrl, tok, hash, label, lang) {
     }
 
     if (!d) { console.log('[sololatino] srv ' + label + ' null response'); return null; }
+
     if (d.error) { console.log('[sololatino] srv ' + label + ' error=' + d.error); return null; }
     if (d.type === 'error') { console.log('[sololatino] srv ' + label + ' type-error msg=' + d.msg); return null; }
 
     var title = (label || 'Server') + (lang ? ' (' + lang + ')' : '');
-    var hdrs = { 'Referer': EMBED + '/', 'User-Agent': UA, 'Origin': EMBED };
+    var hdrs = { 'Referer': embedUrl, 'User-Agent': UA, 'Origin': EMBED };
 
     if (d.type === 'mp4' && d.u) {
-      return { title: title + ' · Directo', streamUrl: d.u, headers: hdrs, subtitles: [], _mp4: true };
+      return { title: title + ' · Directo', streamUrl: absUrl(d.u), headers: hdrs, subtitles: [], _mp4: true };
     }
     if (d.type === 'iframe' && d.url) {
       // Nested embed host — surface the URL; a downstream extractor can be added if needed.
       console.log('[sololatino] srv ' + label + ' nested iframe: ' + d.url);
-      return { title: title + ' · Embed', streamUrl: d.url, headers: hdrs, subtitles: [], _mp4: false };
+      return { title: title + ' · Embed', streamUrl: absUrl(d.url), headers: hdrs, subtitles: [], _mp4: false };
     }
     if (d.u) {
-      // HLS via the signed /p.php proxy.
-      var px = EMBED + '/p.php?url=' + encodeURIComponent(d.u) + '&sig=' + encodeURIComponent(d.sig || '');
-      return { title: title + ' · HLS', streamUrl: px, headers: hdrs, subtitles: [], _mp4: false };
+      var out;
+      if (/^https?:\/\//i.test(d.u) || d.u.charAt(0) === '/') {
+        // Already a full or root-relative URL (e.g. /p.php?v=hash or a direct mediafire link) — use as-is.
+        out = absUrl(d.u);
+      } else {
+        // Raw external m3u8 that must go through the signed proxy.
+        out = EMBED + '/p.php?url=' + encodeURIComponent(d.u) + '&sig=' + encodeURIComponent(d.sig || '') +
+              (d.ctx ? '&ctx=' + encodeURIComponent(d.ctx) : '');
+      }
+      var isMp4 = /\.mp4(\?|$)/i.test(out) || /mediafire/i.test(out);
+      return { title: title + (isMp4 ? ' · Directo' : ' · HLS'), streamUrl: out, headers: hdrs, subtitles: [], _mp4: isMp4 };
     }
     console.log('[sololatino] srv ' + label + ' unhandled shape keys=' + Object.keys(d).join(','));
     return null;
@@ -293,6 +312,12 @@ async function sphp(embedUrl, params) {
 }
 
 /* ---------- tiny helpers ---------- */
+function absUrl(u) {
+  if (!u) return u;
+  if (/^https?:\/\//i.test(u)) return u;
+  if (u.charAt(0) === '/') return EMBED + u;
+  return u;
+}
 function decodeEntities(str) {
   if (!str) return '';
   return str.replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#0?39;/g, "'")
