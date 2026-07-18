@@ -191,48 +191,21 @@ async function extractStreamUrl(url) {
       return JSON.stringify({ streams: [], subtitles: '', subtitlesHeaders: {}, allSubtitles: [] });
     }
 
-    // 3) Scan (optional): gives the server list + meta. Non-fatal — the download path
-    //    below only needs the token, so we don't bail if the scan is empty.
-    var scan = await sphp(embedUrl, { a: '1', tok: tok });
-    console.log('[sololatino] scan raw=' + JSON.stringify(scan).slice(0, 400));
-
-    var streams = [];
-
-    // PRIMARY (ungated): the "Directo" download button. a=dlshort_mf + tok only — no
-    //   no_click gate — returns a short link that redirects through /p.php -> MediaFire.
+    // 3) Get the ungated "Directo" download link:  a=dlshort_mf + tok only (no no_click gate).
+    //    Returns a short link that 302-redirects through /p.php -> MediaFire (progressive MP4).
     var dm = await sphp(embedUrl, { a: 'dlshort_mf', tok: tok });
     console.log('[sololatino] dlshort_mf -> ' + JSON.stringify(dm).slice(0, 300));
     var shortUrl = dm && (dm.short || dm.u || dm.url || dm.mf_short);
+
+    var streams = [];
     if (shortUrl) {
-      streams.push({ title: 'Directo', streamUrl: absUrl(shortUrl),
-        headers: { 'Referer': embedUrl, 'User-Agent': UA, 'Origin': EMBED }, subtitles: [], _mp4: true });
+      // Append a #.mp4 fragment so the player classifies this as progressive MP4, not HLS.
+      // (Servers/redirects ignore the fragment; it only steers the player's stream-type guess.)
+      var streamUrl = absUrl(shortUrl);
+      if (streamUrl.indexOf('#') === -1) streamUrl += '#.mp4';
+      streams.push({ title: 'Directo', streamUrl: streamUrl,
+        headers: { 'Referer': embedUrl, 'User-Agent': UA, 'Origin': EMBED }, subtitles: [] });
     }
-
-    // SECONDARY (best-effort): per-server player resolve for extra language/quality options.
-    //   These go through the a=2 no_click gate and may fail; that's fine, PRIMARY covers us.
-    if (scan && scan.s && scan.s.length) {
-      var groups = [];
-      if (scan.langs_s) {
-        if (scan.langs_s.LAT) groups.push({ lang: 'LAT', list: scan.langs_s.LAT });
-        if (scan.langs_s.ESP) groups.push({ lang: 'ESP', list: scan.langs_s.ESP });
-        for (var k in scan.langs_s) {
-          if (k !== 'LAT' && k !== 'ESP') groups.push({ lang: k, list: scan.langs_s[k] });
-        }
-      }
-      if (!groups.length) groups.push({ lang: '', list: scan.s });
-
-      for (var g = 0; g < groups.length; g++) {
-        var grp = groups[g];
-        var resolved = await Promise.all(grp.list.map(function (srv) {
-          return resolveServer(embedUrl, tok, srv[1], srv[0], grp.lang);
-        }));
-        for (var i = 0; i < resolved.length; i++) if (resolved[i]) streams.push(resolved[i]);
-      }
-    }
-
-    // Sort: direct mp4 first (AVPlayer-friendly), HLS after.
-    streams.sort(function (a, b) { return (a._mp4 ? 0 : 1) - (b._mp4 ? 0 : 1); });
-    for (var s = 0; s < streams.length; s++) delete streams[s]._mp4;
 
     console.log('[sololatino] streams resolved=' + streams.length);
     return JSON.stringify({ streams: streams, subtitles: '', subtitlesHeaders: {}, allSubtitles: [] });
@@ -240,55 +213,6 @@ async function extractStreamUrl(url) {
     console.log('[sololatino] stream error: ' + e);
     return JSON.stringify({ streams: [], subtitles: '', subtitlesHeaders: {}, allSubtitles: [] });
   }
-}
-
-/* Resolve a single server hash via  POST /s.php a=2. Handles the no_click retry. */
-async function resolveServer(embedUrl, tok, hash, label, lang) {
-  try {
-    var d = await sphp(embedUrl, { a: '2', v: hash, tok: tok });
-    console.log('[sololatino] a2 ' + label + '/' + lang + ' -> ' + JSON.stringify(d).slice(0, 300));
-
-    // Clear the human-gesture gate if present: ping click, retry with r=1 (a couple attempts).
-    var tries = 0;
-    while (d && d.type === 'error' && d.msg === 'no_click' && tries < 2) {
-      await sphp(embedUrl, { a: 'click', tok: tok, v: hash });
-      d = await sphp(embedUrl, { a: '2', v: hash, tok: tok, r: '1' });
-      console.log('[sololatino] a2-retry ' + label + ' -> ' + JSON.stringify(d).slice(0, 300));
-      tries++;
-    }
-
-    if (!d) { console.log('[sololatino] srv ' + label + ' null response'); return null; }
-
-    if (d.error) { console.log('[sololatino] srv ' + label + ' error=' + d.error); return null; }
-    if (d.type === 'error') { console.log('[sololatino] srv ' + label + ' type-error msg=' + d.msg); return null; }
-
-    var title = (label || 'Server') + (lang ? ' (' + lang + ')' : '');
-    var hdrs = { 'Referer': embedUrl, 'User-Agent': UA, 'Origin': EMBED };
-
-    if (d.type === 'mp4' && d.u) {
-      return { title: title + ' · Directo', streamUrl: absUrl(d.u), headers: hdrs, subtitles: [], _mp4: true };
-    }
-    if (d.type === 'iframe' && d.url) {
-      // Nested embed host — surface the URL; a downstream extractor can be added if needed.
-      console.log('[sololatino] srv ' + label + ' nested iframe: ' + d.url);
-      return { title: title + ' · Embed', streamUrl: absUrl(d.url), headers: hdrs, subtitles: [], _mp4: false };
-    }
-    if (d.u) {
-      var out;
-      if (/^https?:\/\//i.test(d.u) || d.u.charAt(0) === '/') {
-        // Already a full or root-relative URL (e.g. /p.php?v=hash or a direct mediafire link) — use as-is.
-        out = absUrl(d.u);
-      } else {
-        // Raw external m3u8 that must go through the signed proxy.
-        out = EMBED + '/p.php?url=' + encodeURIComponent(d.u) + '&sig=' + encodeURIComponent(d.sig || '') +
-              (d.ctx ? '&ctx=' + encodeURIComponent(d.ctx) : '');
-      }
-      var isMp4 = /\.mp4(\?|$)/i.test(out) || /mediafire/i.test(out);
-      return { title: title + (isMp4 ? ' · Directo' : ' · HLS'), streamUrl: out, headers: hdrs, subtitles: [], _mp4: isMp4 };
-    }
-    console.log('[sololatino] srv ' + label + ' unhandled shape keys=' + Object.keys(d).join(','));
-    return null;
-  } catch (e) { console.log('[sololatino] resolveServer error: ' + e); return null; }
 }
 
 /* POST helper for player.pelisserieshoy.com/s.php (x-www-form-urlencoded). */
