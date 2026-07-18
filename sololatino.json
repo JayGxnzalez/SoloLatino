@@ -6,7 +6,7 @@
     "icon": "https://avatars.githubusercontent.com/JayGxnzalez?s=400",
     "url": "https://github.com/JayGxnzalez"
   },
-  "version": "1.0.0 debug 2",
+  "version": "1.0.0 debug 3",
   "language": "Spanish (Latino)",
   "streamType": "HLS",
   "quality": "1080p",
@@ -16,5 +16,5 @@
   "type": "Movie/TV",
   "downloadSupport": true,
   "asyncJS": true,
-  "softsub": false
+  "softsub": true
 }
