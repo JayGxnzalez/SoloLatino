@@ -199,6 +199,7 @@ async function extractStreamUrl(url) {
     }
 
     // Build language-ordered server groups: LAT first, then ESP, then whatever else, then flat.
+    console.log('[sololatino] scan raw=' + JSON.stringify(scan).slice(0, 400));
     var groups = [];
     if (scan.langs_s) {
       if (scan.langs_s.LAT) groups.push({ lang: 'LAT', list: scan.langs_s.LAT });
@@ -235,12 +236,20 @@ async function extractStreamUrl(url) {
 async function resolveServer(embedUrl, tok, hash, label, lang) {
   try {
     var d = await sphp(embedUrl, { a: '2', v: hash, tok: tok });
-    if (d && d.type === 'error' && d.msg === 'no_click') {
-      // Fire the human-gesture ping the page uses, then retry with r=1.
+    console.log('[sololatino] a2 ' + label + '/' + lang + ' -> ' + JSON.stringify(d).slice(0, 300));
+
+    // Clear the human-gesture gate if present: ping click, retry with r=1 (a couple attempts).
+    var tries = 0;
+    while (d && d.type === 'error' && d.msg === 'no_click' && tries < 2) {
       await sphp(embedUrl, { a: 'click', tok: tok, v: hash });
       d = await sphp(embedUrl, { a: '2', v: hash, tok: tok, r: '1' });
+      console.log('[sololatino] a2-retry ' + label + ' -> ' + JSON.stringify(d).slice(0, 300));
+      tries++;
     }
-    if (!d || d.error) { console.log('[sololatino] srv ' + label + ' err=' + (d && d.error)); return null; }
+
+    if (!d) { console.log('[sololatino] srv ' + label + ' null response'); return null; }
+    if (d.error) { console.log('[sololatino] srv ' + label + ' error=' + d.error); return null; }
+    if (d.type === 'error') { console.log('[sololatino] srv ' + label + ' type-error msg=' + d.msg); return null; }
 
     var title = (label || 'Server') + (lang ? ' (' + lang + ')' : '');
     var hdrs = { 'Referer': EMBED + '/', 'User-Agent': UA, 'Origin': EMBED };
@@ -258,6 +267,7 @@ async function resolveServer(embedUrl, tok, hash, label, lang) {
       var px = EMBED + '/p.php?url=' + encodeURIComponent(d.u) + '&sig=' + encodeURIComponent(d.sig || '');
       return { title: title + ' · HLS', streamUrl: px, headers: hdrs, subtitles: [], _mp4: false };
     }
+    console.log('[sololatino] srv ' + label + ' unhandled shape keys=' + Object.keys(d).join(','));
     return null;
   } catch (e) { console.log('[sololatino] resolveServer error: ' + e); return null; }
 }
